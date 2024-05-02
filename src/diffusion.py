@@ -62,7 +62,7 @@ def _diffusion(key, state):
       set_rosbag_recording(state, True)
       _press_logging("l", state)
       state.tracked_objs.update({
-      "choppose_target": np.zeros(8)
+        "choppose_target": np.zeros(8)
       })
     print_and_cr("Entering diffusion mode")
   else:
@@ -149,6 +149,7 @@ def setup_diffusion(state):
   print_and_cr("Done!")
 
 def init_diffusion_state(state):
+  state.last_diffusion_cmd = state.current_position
   with state._diffusion_lock:
     state.diffusion_state["action_idx"] = 0
     state.diffusion_state["pred_action"] = None
@@ -217,7 +218,7 @@ def __diffusion(state, curr_time):
     state.diffusion_state["action_idx"] = action_idx + 1
   if pred_action is None or action_idx >= len(pred_action):
     print_and_cr("WARN: No action available!")
-    return state.current_position, [None] * 7
+    return state.last_diffusion_cmd, [None] * 7
   target_cmd = pred_action[action_idx]
   print_and_cr(f"Using action {action_idx+1} of {len(pred_action)}")
 
@@ -244,5 +245,6 @@ def __diffusion(state, curr_time):
   TARGET_CHOPPOSE_PUBLISHER.update_vector(target_cmd)
   state.tracked_objs["choppose_target"] = np.copy(target_cmd)
   pos_cmd = get_IK_from_mujoco(state.sim, state.current_position, target_vector=target_cmd)
+  state.last_diffusion_cmd = pos_cmd
 
   return pos_cmd, [None] * 7
