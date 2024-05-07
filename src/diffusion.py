@@ -168,6 +168,9 @@ def gen_state(state):
     xyz, quat, chop = current_choppose[:3], current_choppose[3:7], current_choppose[7:8]
     rpy = scipyR.from_quat(quat).as_euler("xyz")
     current_choppose = np.hstack([xyz, rpy[1:2], chop])
+  elif "lego" in state.config.model_name:
+    xyz, chop = current_choppose[:3], current_choppose[7:8]
+    current_choppose = np.hstack([xyz, chop])
 
   diffusion_state = [current_choppose]
   with state._diffusion_lock:
@@ -175,36 +178,24 @@ def gen_state(state):
       diffusion_state.append(np.array(state.diffusion_state['ball']))
     if state.config.data.use_target_pose:
       pose = state.diffusion_state["target_pose"].copy()
-      if "piggy_bank" in state.config.model_name:
-        ee_pose = construct_choppose(state.arm, state.current_position)[:7]
-        if "prev_tp" in state.diffusion_state:
-          if np.all(state.diffusion_state["target_pose"] == state.diffusion_state["prev_tp"]):
-            print_and_cr("WARN: Lost coin!")
-            prev_ee_trf = xyzquat_to_trf(state.diffusion_state["prev_ee"])
-            prev_coin_trf = xyzquat_to_trf(state.diffusion_state["prev_tp"])
-            ee_trf = xyzquat_to_trf(ee_pose)
-            interp_coin_trf = ee_trf @ np.linalg.inv(prev_ee_trf) @ prev_coin_trf
-            state.diffusion_state["target_pose"][0:3] = interp_coin_trf[:3,3]
-            state.diffusion_state["target_pose"][3:7] = scipyR.from_matrix(interp_coin_trf[:3,:3]).as_quat()
-        state.diffusion_state["prev_ee"] = ee_pose.copy()
-        state.diffusion_state["prev_tp"] = state.diffusion_state["target_pose"].copy()
-
-        coin_quat = state.diffusion_state["target_pose"][3:7]
-
-        seq = "XYZ"
-        coin_angles = scipyR.from_quat(coin_quat).as_euler(seq)
-        diffusion_state.append(state.diffusion_state["target_pose"][:3])
-        diffusion_state.append(coin_angles[:2])
+      if "lego" in state.config.model_name:
+        rb_rpy = scipyR.from_quat(pose[3:7]).as_euler("xyz")
+        diffusion_state.append(pose[:2])
+        diffusion_state.append(rb_rpy[2:3])
       else:
-        diffusion_info["target_pose"] = state.diffusion_state["target_pose"].copy()
-        diffusion_state.append(diffusion_info["target_pose"])
+        diffusion_state.append(pose)
   state = {"state": np.hstack(diffusion_state).flatten()}
   return state
 
-def chopify_piggy_bank(state, only_ee):
+def chopify_piggy_bank(state):
   xyz, pitch, rest = state[:3], state[3], state[4:]
   rpy = [-np.pi, pitch, -np.pi]
   quat = scipyR.from_euler("xyz", rpy).as_quat()
+  return np.hstack([xyz, quat, rest])
+
+def chopify_lego(state):
+  xyz, rest = state[:3], state[3:]
+  quat = scipyR.from_euler("xyz", [-np.pi, 0, -np.pi]).as_quat()
   return np.hstack([xyz, quat, rest])
 
 def __diffusion(state, curr_time):
@@ -223,8 +214,11 @@ def __diffusion(state, curr_time):
   print_and_cr(f"Using action {action_idx+1} of {len(pred_action)}")
 
   if "piggy_bank" in state.config.model_name:
-    diffusion_info["state"] = chopify_piggy_bank(diffusion_info["state"], True)
-    target_cmd = chopify_piggy_bank(target_cmd, False)
+    diffusion_info["state"] = chopify_piggy_bank(diffusion_info["state"])
+    target_cmd = chopify_piggy_bank(target_cmd)
+  elif "lego" in state.config.model_name:
+    diffusion_info["state"] = chopify_lego(diffusion_info["state"])
+    target_cmd = chopify_lego(target_cmd)
   
   mconfig = state.config.model
   if mconfig.delta:
