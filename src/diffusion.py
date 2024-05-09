@@ -2,7 +2,7 @@ import os
 from threading import Lock, Thread, Event
 import time
 import numpy as np
-
+from collections import deque
 
 import rospy
 from geometry_msgs.msg import PointStamped, PoseStamped
@@ -13,7 +13,7 @@ from diffusion_policy.policy import DiffusionPolicy
 from utils import load_yaml_config
 
 from tycho_env.utils import R_optitrack2base, print_and_cr
-from tycho_env.utils import construct_choppose, get_ee_from_tracker
+from tycho_env.utils import construct_choppose
 from tycho_demo.utils import ChopPosePublisher
 from tycho_demo.addon.recording import set_rosbag_recording
 from tycho_demo.addon.logger import _press_logging
@@ -84,26 +84,26 @@ def stop_inference_task(state):
     state.diffusion_agent.clear_obs()
 
 def inference_task(state):
-  Ta = state.diffusion_agent.config.action_horizon
   control_freq = ROBOT_FEEDBACK_FREQUENCY / state.counter_skip_freq
-  inference_freq = control_freq / Ta
-  loop_period = 1. / inference_freq
-  print_and_cr(f"loop freq={inference_freq}hz, period={loop_period:.3f}s")
   while not state.stop_inference_event.is_set():
     start = time.perf_counter()
     actions = state.diffusion_agent.get_action()
+    end = time.perf_counter()
     if actions is not None:
+      n_elapsed_steps = round((end - start) * control_freq)
+      print_and_cr(f"Inference took {end-start:.3f}s ({n_elapsed_steps} steps)")
+      actions = actions[n_elapsed_steps:]
       with state._diffusion_lock:
-        state.diffusion_state["pred_action"] = actions
-        state.diffusion_state["action_idx"] = 0
+        idx = 0
+        for action_list in state.diffusion_state["pred_action"]:
+          if idx >= len(actions):
+            break
+          action_list.append(actions[idx])
+          idx += 1
+        for i in range(idx, len(actions)):
+          state.diffusion_state["pred_action"].append([actions[i]])
     else:
       print_and_cr("WARN: No observations available!")
-    elapsed = time.perf_counter() - start
-    if elapsed < loop_period:
-      if state.stop_inference_event.wait(timeout=loop_period - elapsed):
-        break
-    else:
-      print_and_cr("WARN: Inference loop overrun!")
   state.stop_inference_event.clear()
 
 def load_agent(state):
@@ -151,8 +151,9 @@ def setup_diffusion(state):
 def init_diffusion_state(state):
   state.last_diffusion_cmd = state.current_position
   with state._diffusion_lock:
-    state.diffusion_state["action_idx"] = 0
-    state.diffusion_state["pred_action"] = None
+    # This is a deque where each element is a list of actions predicted at that timestep.
+    # Average the actions to get the smoothed action. Actions should be popped off the left.
+    state.diffusion_state["pred_action"] = deque([])
 
 def xyzquat_to_trf(xyzquat):
   assert len(xyzquat) == 7
@@ -204,14 +205,13 @@ def __diffusion(state, curr_time):
   diffusion_info = gen_state(state)
   state.diffusion_agent.add_obs(diffusion_info)
   with state._diffusion_lock:
-    action_idx = state.diffusion_state["action_idx"]
-    pred_action = state.diffusion_state["pred_action"]
-    state.diffusion_state["action_idx"] = action_idx + 1
-  if pred_action is None or action_idx >= len(pred_action):
+    action_deque: deque = state.diffusion_state["pred_action"]
+    pred_action = action_deque.popleft() if len(action_deque) else None
+  if pred_action is None:
     print_and_cr("WARN: No action available!")
     return state.last_diffusion_cmd, [None] * 7
-  target_cmd = pred_action[action_idx]
-  print_and_cr(f"Using action {action_idx+1} of {len(pred_action)}")
+  target_cmd = np.mean(pred_action, axis=0)
+  print_and_cr(f"Averaging over {len(pred_action)} actions")
 
   if "piggy_bank" in state.config.model_name:
     diffusion_info["state"] = chopify_piggy_bank(diffusion_info["state"])
